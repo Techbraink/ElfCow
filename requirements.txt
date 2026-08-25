@@ -1,0 +1,11 @@
+PySide6==6.9.2
+torch==2.8.0
+transformers==4.56.2
+sentencepiece==0.2.1
+PyMuPDF==1.26.4
+reportlab==4.4.3
+pytesseract==0.3.13
+Pillow==11.3.0
+pyinstaller==6.15.0
+huggingface_hub==0.34.4
+fonttools==4.59.2
