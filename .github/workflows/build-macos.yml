@@ -1,52 +1,366 @@
-name: Build macOS App
+name: Build PDF Translator for macOS
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   build-macos:
+    name: Build macOS App
     runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      # ------------------------------------------------------------
+      # 1. Get the repository
+      # ------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # 2. Install Python
+      # ------------------------------------------------------------
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
-      - name: Prepare scripts
+      # ------------------------------------------------------------
+      # 3. Show build environment
+      # ------------------------------------------------------------
+      - name: Show build environment
         run: |
-          chmod +x Install.command build-mac.command scripts/*.command
+          set -euxo pipefail
 
-      - name: Install and prepare offline resources
+          echo "Python:"
+          python3 --version
+
+          echo "Architecture:"
+          uname -m
+
+          echo "macOS:"
+          sw_vers
+
+          echo "Homebrew:"
+          brew --version
+
+      # ------------------------------------------------------------
+      # 4. Cache the M2M100 translation model
+      # ------------------------------------------------------------
+      - name: Cache M2M100 translation model
+        uses: actions/cache@v4
+        with:
+          path: resources/models/m2m100_418M
+          key: m2m100-418M-macos-${{ runner.arch }}-v1
+
+      # ------------------------------------------------------------
+      # 5. Create isolated virtual environment
+      # ------------------------------------------------------------
+      - name: Create isolated Python environment
+        run: |
+          set -euxo pipefail
+
+          python3 -m venv .venv
+
+          .venv/bin/python -m pip install --upgrade \
+            pip \
+            setuptools \
+            wheel
+
+      # ------------------------------------------------------------
+      # 6. Install Python dependencies
+      # ------------------------------------------------------------
+      - name: Install Python dependencies
         env:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: |
+          set -euxo pipefail
+
+          .venv/bin/python -m pip install \
+            -r requirements.txt
+
+      # ------------------------------------------------------------
+      # 7. Make scripts executable
+      # ------------------------------------------------------------
+      - name: Prepare build scripts
+        run: |
+          set -euxo pipefail
+
+          chmod +x Install.command || true
+          chmod +x build-mac.command || true
+
+          if [ -d scripts ]; then
+            chmod +x scripts/*.command || true
+          fi
+
+      # ------------------------------------------------------------
+      # 8. Install Tesseract
+      # ------------------------------------------------------------
+      - name: Install Tesseract
+        env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
-        run: ./Install.command
+        run: |
+          set -euxo pipefail
 
-      - name: Preflight
-        run: .venv/bin/python scripts/preflight.py
+          brew list tesseract >/dev/null 2>&1 || \
+            brew install tesseract
 
-      - name: Build app and DMG
-        run: ./build-mac.command
+          brew list tesseract-lang >/dev/null 2>&1 || \
+            brew install tesseract-lang
 
-      - name: Upload DMG
+          echo "Tesseract:"
+          tesseract --version
+
+      # ------------------------------------------------------------
+      # 9. Bundle Tesseract + required OCR languages
+      # ------------------------------------------------------------
+      - name: Bundle Tesseract
+        run: |
+          set -euxo pipefail
+
+          chmod +x scripts/bundle_tesseract.command
+
+          ./scripts/bundle_tesseract.command
+
+      # ------------------------------------------------------------
+      # 10. Verify Tesseract bundle
+      # ------------------------------------------------------------
+      - name: Verify OCR languages
+        run: |
+          set -euxo pipefail
+
+          TESSERACT="$PWD/resources/tesseract/bin/tesseract"
+          TESSDATA="$PWD/resources/tesseract/share/tessdata"
+
+          echo "Tesseract:"
+          "$TESSERACT" --version
+
+          echo ""
+          echo "Checking OCR language files..."
+
+          for lang in eng rus tha ind lav kat; do
+
+            FILE="$TESSDATA/${lang}.traineddata"
+
+            if [ ! -s "$FILE" ]; then
+              echo ""
+              echo "ERROR: Missing OCR language:"
+              echo "$FILE"
+              exit 1
+            fi
+
+            echo "OK: $lang"
+            ls -lh "$FILE"
+
+          done
+
+          echo ""
+          echo "Bundled OCR languages:"
+
+          "$TESSERACT" \
+            --tessdata-dir "$TESSDATA" \
+            --list-langs
+
+      # ------------------------------------------------------------
+      # 11. Download/prepare translation model
+      # ------------------------------------------------------------
+      - name: Prepare translation model
+        run: |
+          set -euxo pipefail
+
+          .venv/bin/python scripts/download_model.py
+
+      # ------------------------------------------------------------
+      # 12. Verify translation model
+      # ------------------------------------------------------------
+      - name: Verify translation model
+        run: |
+          set -euxo pipefail
+
+          MODEL="resources/models/m2m100_418M"
+
+          if [ ! -d "$MODEL" ]; then
+            echo "ERROR: Translation model directory missing."
+            exit 1
+          fi
+
+          if [ ! -f "$MODEL/config.json" ]; then
+            echo "ERROR: M2M100 config.json missing."
+            exit 1
+          fi
+
+          if [ ! -f "$MODEL/pytorch_model.bin" ] && \
+             [ ! -f "$MODEL/model.safetensors" ]; then
+            echo "ERROR: M2M100 model weights missing."
+            exit 1
+          fi
+
+          echo "Translation model OK:"
+          du -sh "$MODEL"
+
+      # ------------------------------------------------------------
+      # 13. Verify fonts
+      # ------------------------------------------------------------
+      - name: Verify fonts
+        run: |
+          set -euxo pipefail
+
+          for font in \
+            resources/fonts/NotoSans-Regular.ttf \
+            resources/fonts/NotoSansThai-Regular.ttf \
+            resources/fonts/NotoSansGeorgian-Regular.ttf
+          do
+            if [ ! -s "$font" ]; then
+              echo "ERROR: Missing font:"
+              echo "$font"
+              exit 1
+            fi
+
+            echo "OK:"
+            ls -lh "$font"
+          done
+
+      # ------------------------------------------------------------
+      # 14. Run project preflight if available
+      # ------------------------------------------------------------
+      - name: Run application preflight
+        run: |
+          set -euxo pipefail
+
+          if [ -f scripts/preflight.py ]; then
+            .venv/bin/python scripts/preflight.py
+          else
+            echo "No preflight.py found. Continuing."
+          fi
+
+      # ------------------------------------------------------------
+      # 15. Build the macOS application
+      # ------------------------------------------------------------
+      - name: Build PDF Translator
+        run: |
+          set -euxo pipefail
+
+          chmod +x build-mac.command
+
+          ./build-mac.command
+
+      # ------------------------------------------------------------
+      # 16. Verify application exists
+      # ------------------------------------------------------------
+      - name: Verify macOS application
+        run: |
+          set -euxo pipefail
+
+          APP="release/PDF Translator.app"
+
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: macOS application was not created."
+            echo ""
+            echo "Release directory:"
+            find release -maxdepth 3 -print || true
+            exit 1
+          fi
+
+          echo "Application created:"
+          du -sh "$APP"
+
+      # ------------------------------------------------------------
+      # 17. Check for accidental Tk/Carbon dependency
+      # ------------------------------------------------------------
+      - name: Check for Tk and Carbon dependencies
+        run: |
+          set -euxo pipefail
+
+          APP="release/PDF Translator.app"
+
+          EXECUTABLE="$APP/Contents/MacOS/PDF Translator"
+
+          if [ ! -f "$EXECUTABLE" ]; then
+            echo "WARNING: Expected executable not found:"
+            echo "$EXECUTABLE"
+
+            echo ""
+            echo "Application contents:"
+            find "$APP/Contents/MacOS" -maxdepth 2 -type f -print
+
+            exit 1
+          fi
+
+          echo "Checking executable dependencies..."
+
+          otool -L "$EXECUTABLE" || true
+
+          echo ""
+          echo "Checking for Tk/Carbon..."
+
+          if otool -L "$EXECUTABLE" | \
+             grep -Ei 'Carbon\.framework|Tk\.framework|Tcl\.framework|libtk|libtcl|_tkinter'
+          then
+            echo ""
+            echo "ERROR: Forbidden Tk/Tcl/Carbon dependency detected."
+            echo "The application must use PySide6/Qt."
+            exit 1
+          fi
+
+          echo ""
+          echo "No direct Tk/Tcl/Carbon dependency detected."
+
+      # ------------------------------------------------------------
+      # 18. Create DMG
+      # ------------------------------------------------------------
+      - name: Create DMG
+        run: |
+          set -euxo pipefail
+
+          APP="release/PDF Translator.app"
+          DMG="release/PDFTranslator-macOS.dmg"
+
+          rm -f "$DMG"
+
+          hdiutil create \
+            -volname "PDF Translator" \
+            -srcfolder "$APP" \
+            -ov \
+            -format UDZO \
+            "$DMG"
+
+      # ------------------------------------------------------------
+      # 19. Verify DMG
+      # ------------------------------------------------------------
+      - name: Verify DMG
+        run: |
+          set -euxo pipefail
+
+          DMG="release/PDFTranslator-macOS.dmg"
+
+          if [ ! -f "$DMG" ]; then
+            echo "ERROR: DMG was not created."
+            exit 1
+          fi
+
+          echo ""
+          echo "DMG information:"
+          hdiutil imageinfo "$DMG"
+
+          echo ""
+          echo "Final files:"
+          ls -lh "$DMG"
+          du -sh "release/PDF Translator.app"
+
+      # ------------------------------------------------------------
+      # 20. Upload final files to GitHub Actions
+      # ------------------------------------------------------------
+      - name: Upload macOS application
         uses: actions/upload-artifact@v4
         with:
-          name: PDFTranslator-macOS-arm64
-          path: release/PDFTranslator-macOS.dmg
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload app
-        uses: actions/upload-artifact@v4
-        with:
-          name: PDFTranslator-macOS-app-arm64
-          path: "release/PDF Translator.app"
+          name: PDFTranslator-macOS
+          path: |
+            release/PDFTranslator-macOS.dmg
+            release/PDF Translator.app
           if-no-files-found: error
           retention-days: 30
