@@ -1,0 +1,52 @@
+name: Build macOS App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Prepare scripts
+        run: |
+          chmod +x Install.command build-mac.command scripts/*.command
+
+      - name: Install and prepare offline resources
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: ./Install.command
+
+      - name: Preflight
+        run: .venv/bin/python scripts/preflight.py
+
+      - name: Build app and DMG
+        run: ./build-mac.command
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFTranslator-macOS-arm64
+          path: release/PDFTranslator-macOS.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFTranslator-macOS-app-arm64
+          path: "release/PDF Translator.app"
+          if-no-files-found: error
+          retention-days: 30
